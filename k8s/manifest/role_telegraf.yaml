@@ -1,0 +1,23 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: telegraf-role
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/stats", "nodes/proxy", "pods", "nodes/metrics", "namespaces"]
+    verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: telegraf-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: telegraf-role
+subjects:
+  - kind: ServiceAccount
+    name: telegraf
+    namespace: airflow
+

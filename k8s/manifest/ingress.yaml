@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    alb.ingress.kubernetes.io/healthcheck-path: /health
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/load-balancer-name: airflow-alb
+    alb.ingress.kubernetes.io/subnets: eks_prod_public_a, eks_prod_public_c
+    alb.ingress.kubernetes.io/group.name: shared-alb-airflow
+    alb.ingress.kubernetes.io/security-groups: airflow-ingress-sg
+  finalizers:
+    - ingress.k8s.aws/resources
+  name: airflow-ingress
+  namespace: airflow
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: airflow-webserver
+                port:
+                  number: 8080
