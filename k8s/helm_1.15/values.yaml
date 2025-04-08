@@ -1,5 +1,3 @@
-# Licensed to the Apache Software Foundation (ASF) under one
-# or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
 # regarding copyright ownership.  The ASF licenses this file
 # to you under the Apache License, Version 2.0 (the
@@ -65,16 +63,16 @@ containerLifecycleHooks: {}
 airflowHome: /opt/airflow
 
 # Default airflow repository -- overridden by all the specific images below
-defaultAirflowRepository: ${image}
+defaultAirflowRepository: $repository
 
 # Default airflow tag to deploy
-defaultAirflowTag: "2.9.3-python3.10"
+defaultAirflowTag: "2.10.3-python3.10"
 
 # Default airflow digest. If specified, it takes precedence over tag
 defaultAirflowDigest: ~
 
 # Airflow version (Used to make some decisions based on Airflow Version being deployed)
-airflowVersion: "2.9.3"
+airflowVersion: "2.10.3"
 
 # Images
 images:
@@ -83,7 +81,7 @@ images:
     tag: ~
     # Specifying digest takes precedence over tag.
     digest: ~
-    pullPolicy: IfNotPresent
+    pullPolicy: Always
   # To avoid images with user code, you can turn this to 'true' and
   # all the 'run-airflow-migrations' and 'wait-for-airflow-migrations' containers/jobs
   # will use the images from 'defaultAirflowRepository:defaultAirflowTag' values
@@ -247,21 +245,45 @@ airflowConfigAnnotations: {}
 # `airflow_local_settings` file as a string (can be templated).
 airflowLocalSettings: |-
   {{- if semverCompare ">=2.2.0" .Values.airflowVersion }}
-  {{- if not (or .Values.webserverSecretKey .Values.webserverSecretKeySecretName) }}
   from airflow.www.utils import UIAlert
 
-  DASHBOARD_UIALERTS = [
-    UIAlert(
-      'Usage of a dynamic webserver secret key detected. We recommend a static webserver secret key instead.'
-      ' See the <a href='
-      '"https://airflow.apache.org/docs/helm-chart/stable/production-guide.html#webserver-secret-key" '
-      'target="_blank" rel="noopener noreferrer">'
-      'Helm Chart Production Guide</a> for more details.',
-      category="warning",
-      roles=["Admin"],
-      html=True,
-    )
-  ]
+  def get_dashboard_alerts():
+      import os
+      import json
+      import logging
+      pod_name = os.environ.get("HOSTNAME", "")
+      if "webserver" not in pod_name:
+          return []
+      file_path = '/opt/airflow/etc/alert_config.json'
+      try:
+          with open(file_path, 'r', encoding='utf-8-sig') as f:
+              alert_data = json.load(f).get('ui_message', {})
+      except Exception as e:
+          logging.warning(f'[UI_ALERT] Failed to load alert config: {e}')
+          alert_data = {}
+
+      return [
+          UIAlert(msg, category=level, roles=['Admin', 'User'])
+          for level in ('info', 'warning', 'error')
+          for msg in alert_data.get(level, [])
+      ]
+
+
+  DASHBOARD_UIALERTS = get_dashboard_alerts()
+  # DASHBOARD_UIALERTS = get_dashboard_alerts()
+  #{{- if not (or .Values.webserverSecretKey .Values.webserverSecretKeySecretName) }}
+  #DASHBOARD_UIALERTS = [
+  #    UIAlert(
+  #      'Usage of a dynamic webserver secret key detected. We recommend a static webserver secret key instead.'
+  #      ' See the <a href='
+  #      '"https://airflow.apache.org/docs/helm-chart/stable/production-guide.html#webserver-secret-key" '
+  #      'target="_blank" rel="noopener noreferrer">'
+  #      'Helm Chart Production Guide</a> for more details.',
+  #      category="warning",
+  #      roles=["Admin"],
+  #      html=True,
+  #    )
+  #  ]
   {{- end }}
   {{- end }}
 
@@ -378,11 +400,13 @@ extraConfigMaps: {}
 # TODO: difference from `env`? This is a templated string. Probably should template `env` and remove this.
 extraEnv: |
   - name: PYTHONPATH
-    value: '/opt/airflow/dags/repo:/opt/airflow/dags/repo/plugins'
+    value: '/opt/airflow/dags/repo:/opt/airflow/dags/repo/airflow210/plugins:/opt/airflow/dags/repo/airflow210/dags'
   - name: AIRFLOW__CORE__PLUGINS_FOLDER
-    value: '/opt/airflow/dags/repo/plugins'
+    value: '/opt/airflow/dags/repo/airflow210/plugins'
   - name: AIRFLOW__CORE__DAGS_FOLDER
-    value: '/opt/airflow/dags/repo/dags'
+    value: '/opt/airflow/dags/repo/airflow210/dags'
+  - name : AIRFLOW__CORE__HOSTNAME_CALLABLE
+    value: 'airflow.utils.net:get_host_ip_address'
   - name: AIRFLOW__WEBSERVER__WORKER_REFRESH_INTERVAL
     value: '600'
   - name: AIRFLOW__WEBSERVER__WEB_SERVER_WORKER_TIMEOUT
@@ -392,16 +416,19 @@ extraEnv: |
   - name: AIRFLOW__LOGGING__REMOTE_LOG_CONN_ID
     value: 'aws_conn'
   - name: AIRFLOW__LOGGING__REMOTE_BASE_LOG_FOLDER
-    value: 's3://tidesquare-airflow-logs2'
+    value: 's3://airflow-logs'
+  - name: AIRFLOW__LOGGING__WORKER_LOG_SERVER_PORT
+    value: '8793'
+  - name: AIRFLOW__LOGGING__DELETE_LOCAL_LOGS
+    value: 'True'
   - name: AIRFLOW__CORE__ENABLE_XCOM_PICKLING
     value: 'True'
   - name: AIRFLOW__CORE__DEFAULT_TIMEZONE
     value: 'Asia/Seoul'
-
-# eg:
-# extraEnv: |
-#   - name: AIRFLOW__CORE__LOAD_EXAMPLES
-#     value: 'True'
+  - name: AIRFLOW__CORE__DAGBAG_IMPORT_TIMEOUT
+    value: '120'
+  - name: AIRFLOW__API__AUTH_BACKENDS
+    value: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
 
 # Extra envFrom 'items' that will be added to the definition of airflow containers
 # A string is expected (can be templated).
@@ -590,13 +617,13 @@ workers:
 
   # Allow HPA (KEDA must be disabled).
   hpa:
-    enabled: false
+    enabled: true
 
     # Minimum number of workers created by HPA
-    minReplicaCount: 0
+    minReplicaCount: 2
 
     # Maximum number of workers created by HPA
-    maxReplicaCount: 5
+    maxReplicaCount: 3
 
     # Specifications for which to use to calculate the desired replica count
     metrics:
@@ -606,13 +633,19 @@ workers:
           target:
             type: Utilization
             averageUtilization: 80
+      - type: Resource
+        resource:
+          name: memory
+          target:
+            type: Utilization
+            averageUtilization: 80
 
     # Scaling behavior of the target in both Up and Down directions
     behavior: {}
 
   persistence:
     # Enable persistent volumes
-    enabled: true
+    enabled: false
     # This policy determines whether PVCs should be deleted when StatefulSet is scaled down or removed.
     persistentVolumeClaimRetentionPolicy: ~
     # persistentVolumeClaimRetentionPolicy:
@@ -663,14 +696,14 @@ workers:
 
   resources:
     limits:
-      cpu: 3
-      memory: 13Gi
+      cpu: 7
+      memory: 30Gi
     requests:
-      cpu: 1
-      memory: 1Gi
+      cpu: 6
+      memory: 27Gi
 
   # Grace period for tasks to finish after SIGTERM is sent from kubernetes
-  terminationGracePeriodSeconds: 600
+  terminationGracePeriodSeconds: 5400
 
   # This setting tells kubernetes that its ok to evict
   # when it wants to scale a node down.
@@ -683,35 +716,21 @@ workers:
   # Add additional init containers into workers (templated).
   extraInitContainers: []
 
-  # Mount additional volumes into worker. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
-
   extraVolumes:
-#- name: resource-config-volume
-#     configMap:
-#       name: airflow-resource-config
     - name: data-storage
       persistentVolumeClaim:
         claimName: efs-claim-data
     - name: config-storage
       persistentVolumeClaim:
         claimName: efs-claim-config
+    - name: git-sparse-config-volume
+      configMap:
+        name: git-sparse-checkout-config
+    - name: ssh-config
+      configMap:
+        name: airflow-ssh-config
 
   extraVolumeMounts:
-#    - name: resource-config-volume
-#     mountPath: /home/airflow/.resource/resource.yaml
-#     subPath: resource.yaml
-#     readOnly: true
     - name: data-storage
       mountPath: /data
     - name: config-storage
@@ -723,38 +742,46 @@ workers:
     - name: config-storage
       mountPath: /home/airflow/.resource
       subPath: .resource
+    - name: ssh-config
+      mountPath: /home/airflow/.ssh/config
+      subPath: config
+      readOnly: true
 
   # Select certain nodes for airflow worker pods.
   nodeSelector: {}
   runtimeClassName: ~
   priorityClassName: ~
-  affinity: 
-    nodeAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-        nodeSelectorTerms:
-          - matchExpressions:
-            - key: karpenter.sh/nodepool
-              operator: In
-              values:
-                - airflow
-    podAntiAffinity:
-      requiredDuringSchedulingIgnoredDuringExecution:
-      - labelSelector:
-          matchExpressions:
-          - key: component
-            operator: In
-            values:
-            - scheduler
-        topologyKey: kubernetes.io/zone
+  affinity: {}
+#   nodeAffinity:
+#      requiredDuringSchedulingIgnoredDuringExecution:
+#        nodeSelectorTerms:
+#          - matchExpressions:
+#            - key: karpenter.sh/nodepool
+#              operator: In
+#              values:
+#                - airflow
+# podAntiAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#     - labelSelector:
+#         matchExpressions:
+#         - key: component
+#           operator: In
+#           values:
+#           - scheduler
+#       topologyKey: kubernetes.io/hostname
+
   tolerations: []
-  topologySpreadConstraints: []
+  topologySpreadConstraints:
+    - maxSkew: 1
+      topologyKey: topology.kubernetes.io/zone
+      whenUnsatisfiable: DoNotSchedule
+      labelSelector:
+        matchLabels:
+          component: worker
   # hostAliases to use in worker pods.
   # See:
   # https://kubernetes.io/docs/concepts/services-networking/add-entries-to-pod-etc-hosts-with-host-aliases/
   hostAliases: []
-  # - ip: "127.0.0.2"
-  #   hostnames:
-  #   - "test.hostname.one"
   # - ip: "127.0.0.3"
   #   hostnames:
   #   - "test.hostname.two"
@@ -776,13 +803,11 @@ workers:
     args: ["bash", "/clean-logs"]
     # Number of days to retain logs
     retentionDays: 15
-    resources: {}
-    #  limits:
-    #   cpu: 100m
-    #   memory: 128Mi
-    #  requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+    resources: 
+      requests:
+        cpu: 10m
+        memory: 32Mi
+
     # Detailed default security context for logGroomerSidecar for container level
     securityContexts:
       container: {}
@@ -910,13 +935,10 @@ scheduler:
       maxUnavailable: 1
       # minAvailable: 1
 
-  resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+  resources: 
+    requests:
+      cpu: 100m
+      memory: 128Mi
 
   # This setting tells kubernetes that its ok to evict
   # when it wants to scale a node down.
@@ -927,19 +949,6 @@ scheduler:
   # Add additional init containers into scheduler (templated).
   extraInitContainers: []
 
-  # Mount additional volumes into scheduler. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
-
   extraVolumes:
     - name: data-storage
       persistentVolumeClaim:
@@ -947,6 +956,9 @@ scheduler:
     - name: config-storage
       persistentVolumeClaim:
         claimName: efs-claim-config
+    - name: git-sparse-config-volume
+      configMap:
+        name: git-sparse-checkout-config
 
   extraVolumeMounts:
     - name: data-storage
@@ -963,15 +975,20 @@ scheduler:
   # Select certain nodes for airflow scheduler pods.
   nodeSelector: {}
   affinity: {}
-  # default scheduler affinity is:
-  #  podAntiAffinity:
-  #    preferredDuringSchedulingIgnoredDuringExecution:
-  #    - podAffinityTerm:
-  #        labelSelector:
-  #          matchLabels:
-  #            component: scheduler
-  #        topologyKey: kubernetes.io/hostname
-  #      weight: 100
+#  nodeAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       nodeSelectorTerms:
+#         - matchExpressions:
+#           - key: karpenter.sh/nodepool
+#             operator: In
+#             values:
+#               - airflow
+#   podAntiAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       - labelSelector:
+#           matchLabels:
+#             component: webserver
+#         topologyKey: "kubernetes.io/hostname"
   tolerations: []
   topologySpreadConstraints: []
 
@@ -995,12 +1012,7 @@ scheduler:
     # Number of days to retain logs
     retentionDays: 15
     resources: {}
-    #  limits:
-    #   cpu: 100m
-    #   memory: 128Mi
-    #  requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+    
     # Detailed default security context for logGroomerSidecar for container level
     securityContexts:
       container: {}
@@ -1089,18 +1101,6 @@ createUserJob:
   # Add additional init containers into user creation job (templated).
   extraInitContainers: []
 
-  # Mount additional volumes into user creation job. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
   extraVolumes: []
   extraVolumeMounts: []
 
@@ -1117,12 +1117,6 @@ createUserJob:
   env: []
 
   resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
 
 # Airflow database migration job settings
 migrateDatabaseJob:
@@ -1179,12 +1173,6 @@ migrateDatabaseJob:
     annotations: {}
 
   resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
 
   # Launch additional containers into database migration job
   extraContainers: []
@@ -1192,18 +1180,6 @@ migrateDatabaseJob:
   # Add additional init containers into migrate database job (templated).
   extraInitContainers: []
 
-  # Mount additional volumes into database migration job. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
   extraVolumes: []
   extraVolumeMounts: []
 
@@ -1292,12 +1268,6 @@ _rpcServer:
         - port: "{{ .Values.ports._rpcServer }}"
 
   resources: {}
-  #   limits:
-  #     cpu: 100m
-  #     memory: 128Mi
-  #   requests:
-  #     cpu: 100m
-  #     memory: 128Mi
 
   livenessProbe:
     initialDelaySeconds: 15
@@ -1328,12 +1298,7 @@ webserver:
   configMapAnnotations: {}
   #  hostAliases for the webserver pod
   hostAliases: []
-  #  - ip: "127.0.0.1"
-  #    hostnames:
-  #      - "foo.local"
-  #  - ip: "10.1.2.3"
-  #    hostnames:
-  #      - "foo.remote"
+  
   allowPodLogReading: true
   livenessProbe:
     initialDelaySeconds: 15
@@ -1420,12 +1385,6 @@ webserver:
         - port: "{{ .Values.ports.airflowUI }}"
 
   resources: {}
-  #   limits:
-  #     cpu: 100m
-  #     memory: 128Mi
-  #   requests:
-  #     cpu: 100m
-  #     memory: 128Mi
 
   # Create initial user.
   defaultUser:
@@ -1435,35 +1394,30 @@ webserver:
     email: admin@example.com
     firstName: admin
     lastName: user
-    password: xkdlem0!
+    password: admin
 
   # Launch additional containers into webserver (templated).
   extraContainers: []
   # Add additional init containers into webserver (templated).
   extraInitContainers: []
 
-  # Mount additional volumes into webserver. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
-  extraVolumes: []
-  extraVolumeMounts: []
+  extraVolumes:
+    - name: ui-alert-config
+      configMap:
+        name: airflow-ui-alert-config
+
+  extraVolumeMounts:
+    - name: ui-alert-config
+      mountPath: /opt/airflow/etc
+      readOnly: true
 
   # This string (can be templated) will be mounted into the Airflow Webserver
   # as a custom webserver_config.py. You can bake a webserver_config.py in to
   # your image instead or specify a configmap containing the
   # webserver_config.py.
   webserverConfig: ~
-  # webserverConfig: |
-  #   from airflow import configuration as conf
+  #	           |
+  #  from airflow import configuration as conf
 
   #   # The SQLAlchemy connection string.
   #   SQLALCHEMY_DATABASE_URI = conf.get('database', 'SQL_ALCHEMY_CONN')
@@ -1505,7 +1459,21 @@ webserver:
   # Select certain nodes for airflow webserver pods.
   nodeSelector: {}
   priorityClassName: ~
-  affinity: {} 
+  affinity: {}
+#nodeAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       nodeSelectorTerms:
+#         - matchExpressions:
+#           - key: karpenter.sh/nodepool
+#             operator: In
+#             values:
+#               - airflow
+#   podAntiAffinity:
+#     requiredDuringSchedulingIgnoredDuringExecution:
+#       - labelSelector:
+#            matchLabels:
+#              component: scheduler
+#          topologyKey: "kubernetes.io/hostname"
 
   tolerations: []
   topologySpreadConstraints: []
@@ -1588,7 +1556,7 @@ triggerer:
 
   persistence:
     # Enable persistent volumes
-    enabled: true
+    enabled: false
     # This policy determines whether PVCs should be deleted when StatefulSet is scaled down or removed.
     persistentVolumeClaimRetentionPolicy: ~
     # Volume size for triggerer StatefulSet
@@ -1602,13 +1570,10 @@ triggerer:
     # Annotations to add to triggerer volumes
     annotations: {}
 
-  resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
 
   # Grace period for triggerer to finish after SIGTERM is sent from kubernetes
   terminationGracePeriodSeconds: 60
@@ -1621,22 +1586,13 @@ triggerer:
   extraContainers: []
   # Add additional init containers into triggerers (templated).
   extraInitContainers: []
+  
+  extraVolumes:
+    - name: git-sparse-config-volume
+      configMap:
+        name: git-sparse-checkout-config
 
-  # Mount additional volumes into triggerer. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
-  extraVolumes: []
   extraVolumeMounts: []
-
   # Select certain nodes for airflow triggerer pods.
   nodeSelector: {}
   affinity: {}
@@ -1672,12 +1628,7 @@ triggerer:
     # Number of days to retain logs
     retentionDays: 15
     resources: {}
-    #  limits:
-    #   cpu: 100m
-    #   memory: 128Mi
-    #  requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+    
     # Detailed default security context for logGroomerSidecar for container level
     securityContexts:
       container: {}
@@ -1790,12 +1741,6 @@ dagProcessor:
   containerLifecycleHooks: {}
 
   resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
 
   # Grace period for dag processor to finish after SIGTERM is sent from kubernetes
   terminationGracePeriodSeconds: 60
@@ -1809,18 +1754,6 @@ dagProcessor:
   # Add additional init containers into dag processors (templated).
   extraInitContainers: []
 
-  # Mount additional volumes into dag processor. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
   extraVolumes: []
   extraVolumeMounts: []
 
@@ -1856,12 +1789,7 @@ dagProcessor:
     # Number of days to retain logs
     retentionDays: 15
     resources: {}
-    #  limits:
-    #   cpu: 100m
-    #   memory: 128Mi
-    #  requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+    
     securityContexts:
       container: {}
 
@@ -1918,12 +1846,6 @@ flower:
         - port: "{{ .Values.ports.flowerUI }}"
 
   resources: {}
-  #   limits:
-  #     cpu: 100m
-  #     memory: 128Mi
-  #   requests:
-  #     cpu: 100m
-  #     memory: 128Mi
 
   # When not set, the values defined in the global securityContext will be used
   securityContext: {}
@@ -1980,18 +1902,7 @@ flower:
 
   # Launch additional containers into the flower pods.
   extraContainers: []
-  # Mount additional volumes into the flower pods. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
+  
   extraVolumes: []
   extraVolumeMounts: []
 
@@ -2061,12 +1972,6 @@ statsd:
   # Additional network policies as needed
   extraNetworkPolicies: []
   resources: {}
-  #   limits:
-  #     cpu: 100m
-  #     memory: 128Mi
-  #   requests:
-  #     cpu: 100m
-  #     memory: 128Mi
 
   service:
     extraAnnotations: {}
@@ -2074,6 +1979,7 @@ statsd:
   # Select certain nodes for StatsD pods.
   nodeSelector: {}
   affinity: {}
+
   tolerations: []
   topologySpreadConstraints: []
 
@@ -2166,15 +2072,6 @@ pgbouncer:
   # place the Pod on. When you specify a resource limit for a Container, the kubelet enforces those limits so
   # that the running container is not allowed to use more of that resource than the limit you set.
   # See: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
-  # Example:
-  #
-  # resource:
-  #   limits:
-  #     cpu: 100m
-  #     memory: 128Mi
-  #   requests:
-  #     cpu: 100m
-  #     memory: 128Mi
   resources: {}
 
   service:
@@ -2200,18 +2097,6 @@ pgbouncer:
   # Add extra general PgBouncer ini configuration: https://www.pgbouncer.org/config.html
   extraIni: ~
 
-  # Mount additional volumes into pgbouncer. It can be templated like in the following example:
-  #   extraVolumes:
-  #     - name: my-templated-extra-volume
-  #       secret:
-  #          secretName: '{{ include "my_secret_template" . }}'
-  #          defaultMode: 0640
-  #          optional: true
-  #
-  #   extraVolumeMounts:
-  #     - name: my-templated-extra-volume
-  #       mountPath: "{{ .Values.my_custom_path }}"
-  #       readOnly: true
   extraVolumes: []
   extraVolumeMounts: []
 
@@ -2242,12 +2127,7 @@ pgbouncer:
 
   metricsExporterSidecar:
     resources: {}
-    #  limits:
-    #   cpu: 100m
-    #   memory: 128Mi
-    #  requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+    
     sslmode: "disable"
 
     # supply the name of existing secret with PGBouncer connection URI containing
@@ -2325,13 +2205,10 @@ redis:
   #   sizeLimit: 1Gi
   #   medium: Memory
 
-  resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+  resources: 
+    requests:
+      cpu: 10m
+      memory: 32Mi
 
   # If set use as redis secret. Make sure to also set data.brokerUrlSecretName value.
   passwordSecretName: ~
@@ -2448,12 +2325,6 @@ cleanup:
   labels: {}
 
   resources: {}
-  #  limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  #  requests:
-  #   cpu: 100m
-  #   memory: 128Mi
 
   # Create ServiceAccount
   serviceAccount:
@@ -2525,7 +2396,7 @@ config:
     statsd_port: 9125
     statsd_prefix: 'airflow'
 #statsd_host: '{{ printf "%s-statsd" (include "airflow.fullname" .) }}'
-    statsd_host: 'telegraf'
+    statsd_host: 'telegraf-ds'
   webserver:
     enable_proxy_fix: 'True'
     # For Airflow 1.10
@@ -2540,7 +2411,7 @@ config:
     statsd_port: 9125
     statsd_prefix: 'airflow'
 #statsd_host: '{{ printf "%s-statsd" (include "airflow.fullname" .) }}'
-    statsd_host: 'telegraf'
+    statsd_host: 'telegraf-ds'
     # `run_duration` included for Airflow 1.10 backward compatibility; removed in 2.0.
     run_duration: 41460
   elasticsearch:
@@ -2630,67 +2501,20 @@ dags:
     subPath: ~
   gitSync:
     enabled: true
-    repo: ${repo}
-    branch: main
+    repo: $repo
+    branch: master
     rev: HEAD
     # The git revision (branch, tag, or hash) to check out, v4 only
-    ref: main
+    ref: master
     depth: 1
     # the number of consecutive failures allowed before aborting
     maxFailures: 0
     # subpath within the repo where dags are located
     # should be "" if dags are at repo root
     subPath: ""
-    # if your repo needs a user name password
-    # you can load them to a k8s secret like the one below
-    #   ---
-    #   apiVersion: v1
-    #   kind: Secret
-    #   metadata:
-    #     name: git-credentials
-    #   data:
-    #     # For git-sync v3
-    #     GIT_SYNC_USERNAME: <base64_encoded_git_username>
-    #     GIT_SYNC_PASSWORD: <base64_encoded_git_password>
-    #     # For git-sync v4
-    #     GITSYNC_USERNAME: <base64_encoded_git_username>
-    #     GITSYNC_PASSWORD: <base64_encoded_git_password>
-    # and specify the name of the secret below
-    #
-    # credentialsSecret: git-credentials
-    #
-    #
-    # If you are using an ssh clone url, you can load
-    # the ssh private key to a k8s secret like the one below
-    #   ---
-    #   apiVersion: v1
-    #   kind: Secret
-    #   metadata:
-    #     name: airflow-ssh-secret
-    #   data:
-    #     # key needs to be gitSshKey
-    #     gitSshKey: <base64_encoded_data>
-    # and specify the name of the secret below
+    
     sshKeySecret: airflow-git-ssh-key
-    #
-    # Or set sshKeySecret with your key
-    # sshKey: |-
-    #   -----BEGIN {OPENSSH PRIVATE KEY}-----
-    #   ...
-    #   -----END {OPENSSH PRIVATE KEY}-----
-    #
-    # If you are using an ssh private key, you can additionally
-    # specify the content of your known_hosts file, example:
-    #
-    # knownHosts: |
-    #    <host1>,<ip1> <key1>
-    #    <host2>,<ip2> <key2>
-
-    # interval between git sync attempts in seconds
-    # high values are more likely to cause DAGs to become out of sync between different components
-    # low values cause more traffic to the remote git repository
-    # Go-style duration string (e.g. "100ms" or "0.1s" = 100ms).
-    # For backwards compatibility, wait will be used if it is specified.
+    
     period: 5s
     wait: ~
     extraEnv: ~
@@ -2713,29 +2537,26 @@ dags:
     # container level lifecycle hooks
     containerLifecycleHooks: {}
 
-    # Mount additional volumes into git-sync. It can be templated like in the following example:
-    #   extraVolumeMounts:
-    #     - name: my-templated-extra-volume
-    #       mountPath: "{{ .Values.my_custom_path }}"
-    #       readOnly: true
-    extraVolumeMounts: []
-    env: []
-    # Supported env vars for gitsync can be found at https://github.com/kubernetes/git-sync
-    # - name: ""
-    #   value: ""
+    extraVolumeMounts: 
+      - name: git-sparse-config-volume
+        mountPath: /etc/git_config
+        readOnly: true
+
+    env: 
+      - name: GITSYNC_SPARSE_CHECKOUT_FILE
+        value: "/etc/git_config/sparse-checkout"
+      - name: GITSYNC_STALE_WORKTREE_TIMEOUT
+        value: "60m"
 
     # Configuration for empty dir volume
     # emptyDirConfig:
     #   sizeLimit: 1Gi
     #   medium: Memory
 
-    resources: {}
-    #  limits:
-    #   cpu: 100m
-    #   memory: 128Mi
-    #  requests:
-    #   cpu: 100m
-    #   memory: 128Mi
+    resources:
+      requests:
+        cpu: 10m
+        memory: 32Mi
 
 logs:
   # Configuration for empty dir volume (if logs.persistence.enabled == false)
